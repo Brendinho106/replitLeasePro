@@ -173,17 +173,28 @@ async function processDocument(docId: number, filePath: string, fileType: string
 
   try {
     const text = await extractText(filePath, fileType);
-    const chunks = chunkText(text);
+    const chunks = chunkText(text).filter((c) => c.trim().length > 20);
 
-    if (chunks.length > 0) {
-      await db.insert(chunksTable).values(
-        chunks.map((content, idx) => ({
-          documentId: docId,
-          content,
-          chunkIndex: idx,
-        })),
-      );
+    if (chunks.length === 0) {
+      await db
+        .update(documentsTable)
+        .set({
+          status: "error",
+          errorMessage:
+            "No readable text could be extracted. This file may be a scanned image-only PDF. Try re-saving with a text layer, or export to Word/text first.",
+        })
+        .where(eq(documentsTable.id, docId));
+      logger.warn({ docId }, "Document produced no extractable text");
+      return;
     }
+
+    await db.insert(chunksTable).values(
+      chunks.map((content, idx) => ({
+        documentId: docId,
+        content,
+        chunkIndex: idx,
+      })),
+    );
 
     await db
       .update(documentsTable)
