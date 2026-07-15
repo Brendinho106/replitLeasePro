@@ -1,6 +1,9 @@
 import { readFile } from "fs/promises";
+import { createRequire } from "module";
 import path from "path";
 import { logger } from "./logger";
+
+const require = createRequire(import.meta.url);
 
 export type ParsedDoc = {
   text: string;
@@ -30,17 +33,17 @@ export async function extractText(filePath: string, fileType: string): Promise<s
 }
 
 async function extractPdf(filePath: string): Promise<string> {
-  // pdf-parse exports the function directly
-  const pdfParseModule = await import("pdf-parse");
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const pdfParse = (pdfParseModule as any).default ?? pdfParseModule;
+  // Use createRequire to reliably load this CJS module in an ESM context
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const pdfParse = require("pdf-parse") as (buf: Buffer) => Promise<{ text: string }>;
   const buf = await readFile(filePath);
   const data = await pdfParse(buf);
   return data.text;
 }
 
 async function extractSpreadsheet(filePath: string, ext: string): Promise<string> {
-  const XLSX = (await import("xlsx")).default;
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const XLSX = require("xlsx") as typeof import("xlsx");
   const workbook = XLSX.readFile(filePath);
   const lines: string[] = [];
 
@@ -55,7 +58,8 @@ async function extractSpreadsheet(filePath: string, ext: string): Promise<string
 }
 
 async function extractWord(filePath: string): Promise<string> {
-  const mammoth = await import("mammoth");
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const mammoth = require("mammoth") as typeof import("mammoth");
   const result = await mammoth.extractRawText({ path: filePath });
   return result.value;
 }
