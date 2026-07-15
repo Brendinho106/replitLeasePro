@@ -95,6 +95,26 @@ router.get("/openai/conversations/:id", async (req, res): Promise<void> => {
   );
 });
 
+// PATCH /openai/conversations/:id — rename
+router.patch("/openai/conversations/:id", async (req, res): Promise<void> => {
+  const id = Number(req.params.id);
+  if (!id) { res.status(400).json({ error: "Invalid id" }); return; }
+
+  const { title } = req.body as { title?: string };
+  if (!title || typeof title !== "string" || !title.trim()) {
+    res.status(400).json({ error: "title is required" }); return;
+  }
+
+  const [conv] = await db
+    .update(conversationsTable)
+    .set({ title: title.trim() })
+    .where(eq(conversationsTable.id, id))
+    .returning();
+
+  if (!conv) { res.status(404).json({ error: "Conversation not found" }); return; }
+  res.json(conv);
+});
+
 // DELETE /openai/conversations/:id
 router.delete("/openai/conversations/:id", async (req, res): Promise<void> => {
   const params = DeleteOpenaiConversationParams.safeParse(req.params);
