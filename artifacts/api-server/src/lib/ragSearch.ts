@@ -152,14 +152,32 @@ async function fetchKeywordChunks(query: string, limit: number): Promise<Relevan
 
 /**
  * Build a context string from retrieved chunks for the LLM system prompt.
- * Groups chunks by document for clean, readable context blocks.
+ * Each chunk is tagged with a numbered source reference [N] so the LLM can
+ * cite specific documents inline (e.g. "the rent is $X [2]").
+ *
+ * Returns both the formatted context string and the source legend.
  */
-export function buildContext(chunks: RelevantChunk[]): string {
+export function buildContext(chunks: RelevantChunk[]): {
+  context: string;
+  legend: string;
+} {
   if (chunks.length === 0) {
-    return "No lease documents are currently indexed in the database.";
+    return {
+      context: "No lease documents are currently indexed in the database.",
+      legend: "",
+    };
   }
 
-  // Group by document, preserving order (keyword hits first, seeds after)
+  // Assign a stable citation number to each unique document
+  const docNumbers = new Map<number, number>();
+  let nextNum = 1;
+  for (const chunk of chunks) {
+    if (!docNumbers.has(chunk.documentId)) {
+      docNumbers.set(chunk.documentId, nextNum++);
+    }
+  }
+
+  // Group chunks by document
   const byDoc = new Map<number, RelevantChunk[]>();
   for (const chunk of chunks) {
     const existing = byDoc.get(chunk.documentId) ?? [];
@@ -167,14 +185,26 @@ export function buildContext(chunks: RelevantChunk[]): string {
     byDoc.set(chunk.documentId, existing);
   }
 
+  // Build context blocks with citation tags
   const sections: string[] = [];
-  for (const [, docChunks] of byDoc) {
-    const doc = docChunks[0];
-    sections.push(`--- Document: ${doc.originalName} ---`);
+  for (const [docId, docChunks] of byDoc) {
+    const num = docNumbers.get(docId)!;
+    const docName = docChunks[0].originalName;
+    sections.push(`[${num}] ${docName}`);
     for (const chunk of docChunks) {
       sections.push(chunk.content);
     }
   }
 
-  return sections.join("\n\n");
+  // Build legend mapping numbers to document names
+  const legendLines: string[] = ["Source index:"];
+  for (const [docId, num] of docNumbers) {
+    const docChunks = byDoc.get(docId)!;
+    legendLines.push(`  [${num}] ${docChunks[0].originalName}`);
+  }
+
+  return {
+    context: sections.join("\n\n"),
+    legend: legendLines.join("\n"),
+  };
 }

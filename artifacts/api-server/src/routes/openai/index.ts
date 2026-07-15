@@ -33,7 +33,7 @@ You will always receive lease document snippets in the context below. Your prima
 Follow these execution rules:
 1. SYNTHESIZE FROM CONTEXT: For summary or overview requests, draw on ALL provided document snippets to compose a comprehensive answer. Do not treat a synthesis request as a search for a pre-written summary — derive the answer from what is there. Only say "I cannot find that information" if the specific fact is genuinely absent from every provided snippet after careful review.
 2. TRUTH TO SOURCE: Every fact you state must come from the provided snippets. Do not invent figures, dates, or clause language that does not appear in the context. If a specific detail is missing, note it and work with what is available.
-3. CITATION REQUIREMENT: Whenever you cite a term, condition, or obligation, mention the document name and section or page if available (e.g., "Per Section 4.2 of the Red Gate Lease...").
+3. CITATION REQUIREMENT: Every factual statement must be followed by an inline citation using the numbered source tags provided in the context (e.g., "Base rent is $35.41/SF **[1]**" or "The lease expires February 28, 2027 **[3]**"). If a section number or clause title is visible in the snippet, include it too (e.g., "Per Section 5 (Rent) **[2]**..."). Never make a factual claim without a citation tag.
 4. HANDLE AMBIGUITY: Commercial leases often have conflicting terms or amendments. If the context contains overlapping dates or conflicting terms, highlight both and flag it as a potential discrepancy for the user to review manually.
 5. FORMATTING: Use bold text for key dates, financial figures, and entity names so they are highly scannable. Use bullet points or markdown tables for complex schedules (like rent step-ups, expiration dates, or CAM calculations). For a portfolio summary, a markdown table covering tenants, square footage, expiration, and rent is ideal.
 6. NO FORMAL LEGAL ADVICE DISCLAIMER: Do not clutter the chat with repetitive "I am an AI, not a lawyer" disclaimers on every single turn unless specifically asked for a legal opinion. The user knows your role. Focus entirely on extraction and analysis.`;
@@ -189,7 +189,7 @@ router.post("/openai/conversations/:id/messages", async (req, res): Promise<void
 
   // RAG: search for relevant chunks
   const relevantChunks = await searchChunks(userContent, 8);
-  const context = buildContext(relevantChunks);
+  const { context, legend } = buildContext(relevantChunks);
 
   req.log.info(
     { convId, chunkCount: relevantChunks.length },
@@ -200,7 +200,7 @@ router.post("/openai/conversations/:id/messages", async (req, res): Promise<void
   const chatMessages: OpenAI.ChatCompletionMessageParam[] = [
     {
       role: "system",
-      content: `${SYSTEM_PROMPT}\n\n## Lease Document Context\n\n${context}`,
+      content: `${SYSTEM_PROMPT}\n\n## Lease Document Context\n\n${context}\n\n${legend}`,
     },
     ...recentHistory.slice(0, -1).map((m) => ({
       role: m.role as "user" | "assistant",
