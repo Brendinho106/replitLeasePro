@@ -19,7 +19,7 @@ router.post("/verify-access", (req, res) => {
     return;
   }
 
-  if (passcode && passcode === expected) {
+  if (passcode && passcode.trim() === expected.trim()) {
     res.json({ ok: true });
   } else {
     res.status(401).json({ error: "Invalid passphrase" });
