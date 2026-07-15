@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ClerkProvider, SignIn, SignUp, Show, useClerk } from '@clerk/react';
 import { publishableKeyFromHost } from '@clerk/react/internal';
 import { shadcn } from '@clerk/themes';
@@ -11,6 +11,7 @@ import { queryClient } from "./lib/queryClient";
 import { HomeRedirect } from "./pages/HomeRedirect";
 import { SignInPage } from "./pages/SignInPage";
 import { SignUpPage } from "./pages/SignUpPage";
+import { PasscodeGate, isAccessGranted, clearAccess } from "./pages/PasscodeGate";
 import { ChatList } from "./pages/ChatList";
 import { ActiveChat } from "./pages/ActiveChat";
 import { Documents } from "./pages/Documents";
@@ -87,6 +88,7 @@ function ClerkQueryClientCacheInvalidator() {
 
 function ClerkProviderWithRoutes() {
   const [, setLocation] = useLocation();
+  const [accessGranted, setAccessGranted] = useState(isAccessGranted);
 
   return (
     <ClerkProvider
@@ -115,7 +117,7 @@ function ClerkProviderWithRoutes() {
       <QueryClientProvider client={queryClient}>
         <TooltipProvider>
           <ClerkQueryClientCacheInvalidator />
-          
+
           <Show when="signed-in">
             <SidebarLayout>
               <Switch>
@@ -129,12 +131,16 @@ function ClerkProviderWithRoutes() {
           </Show>
 
           <Show when="signed-out">
-            <Switch>
-              <Route path="/" component={HomeRedirect} />
-              <Route path="/sign-in/*?" component={SignInPage} />
-              <Route path="/sign-up/*?" component={SignUpPage} />
-              <Route component={() => <Redirect to="/sign-in" />} />
-            </Switch>
+            {!accessGranted ? (
+              <PasscodeGate onGranted={() => setAccessGranted(true)} />
+            ) : (
+              <Switch>
+                <Route path="/" component={HomeRedirect} />
+                <Route path="/sign-in/*?" component={SignInPage} />
+                <Route path="/sign-up/*?" component={SignUpPage} />
+                <Route component={() => <Redirect to="/sign-in" />} />
+              </Switch>
+            )}
           </Show>
 
           <Toaster />
