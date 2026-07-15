@@ -1,0 +1,27 @@
+kind = "web"
+previewPath = "/"
+title = "LeasePro"
+version = "1.0.0"
+id = "artifacts/lease-pro"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 25681
+
+[services.development]
+run = "pnpm --filter @workspace/lease-pro run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/lease-pro", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/lease-pro/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "25681"
+BASE_PATH = "/"
