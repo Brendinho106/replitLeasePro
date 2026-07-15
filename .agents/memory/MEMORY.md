@@ -1,0 +1,1 @@
+- [LeasePro RAG Architecture](leasepro-rag.md) — RAG uses PG full-text search (tsvector), not embeddings; OpenAI direct key (not Replit AI Integrations)
