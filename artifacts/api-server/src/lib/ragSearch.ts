@@ -151,11 +151,22 @@ async function fetchKeywordChunks(query: string, limit: number): Promise<Relevan
 }
 
 /**
+ * Shorten a filename into a readable citation label.
+ * "Red Gate Third Amendment Signed.pdf" → "Red Gate Third Amendment"
+ */
+function toCitationLabel(originalName: string): string {
+  return originalName
+    .replace(/\.[^/.]+$/, "")        // strip extension
+    .replace(/\s+(signed|executed|final|v\d+)$/i, "") // strip trailing noise words
+    .trim();
+}
+
+/**
  * Build a context string from retrieved chunks for the LLM system prompt.
- * Each chunk is tagged with a numbered source reference [N] so the LLM can
- * cite specific documents inline (e.g. "the rent is $X [2]").
+ * Each chunk is prefixed with its source label so the LLM can cite documents
+ * inline by name — e.g. "rent is $35.41/SF [Penrose III Rent Roll]".
  *
- * Returns both the formatted context string and the source legend.
+ * Returns both the formatted context string and an instruction reminder.
  */
 export function buildContext(chunks: RelevantChunk[]): {
   context: string;
@@ -168,15 +179,6 @@ export function buildContext(chunks: RelevantChunk[]): {
     };
   }
 
-  // Assign a stable citation number to each unique document
-  const docNumbers = new Map<number, number>();
-  let nextNum = 1;
-  for (const chunk of chunks) {
-    if (!docNumbers.has(chunk.documentId)) {
-      docNumbers.set(chunk.documentId, nextNum++);
-    }
-  }
-
   // Group chunks by document
   const byDoc = new Map<number, RelevantChunk[]>();
   for (const chunk of chunks) {
@@ -185,26 +187,22 @@ export function buildContext(chunks: RelevantChunk[]): {
     byDoc.set(chunk.documentId, existing);
   }
 
-  // Build context blocks with citation tags
+  // Build context blocks — each chunk is preceded by its source label
   const sections: string[] = [];
-  for (const [docId, docChunks] of byDoc) {
-    const num = docNumbers.get(docId)!;
-    const docName = docChunks[0].originalName;
-    sections.push(`[${num}] ${docName}`);
+  for (const [, docChunks] of byDoc) {
+    const label = toCitationLabel(docChunks[0].originalName);
     for (const chunk of docChunks) {
-      sections.push(chunk.content);
+      sections.push(`[Source: ${label}]\n${chunk.content}`);
     }
   }
 
-  // Build legend mapping numbers to document names
-  const legendLines: string[] = ["Source index:"];
-  for (const [docId, num] of docNumbers) {
-    const docChunks = byDoc.get(docId)!;
-    legendLines.push(`  [${num}] ${docChunks[0].originalName}`);
-  }
+  const legend =
+    "When citing facts, use the exact label from the [Source: ...] tag above the relevant text, " +
+    "formatted as **[Source Name]** at the end of the sentence. Example: " +
+    '"Base rent is $35.41/SF **[Penrose III Rent Roll]**."';
 
   return {
     context: sections.join("\n\n"),
-    legend: legendLines.join("\n"),
+    legend,
   };
 }
