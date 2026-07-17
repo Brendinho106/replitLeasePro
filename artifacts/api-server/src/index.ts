@@ -36,6 +36,14 @@ app.listen(port, (err) => {
 });
 
 async function processPendingDocuments(): Promise<void> {
+  // Also pick up any docs left in "processing" state — these were mid-flight
+  // when the server was last killed (e.g. a publish/restart) and will never
+  // self-recover unless we reset and retry them here.
+  await db
+    .update(documentsTable)
+    .set({ status: "pending" })
+    .where(eq(documentsTable.status, "processing"));
+
   const pending = await db
     .select()
     .from(documentsTable)

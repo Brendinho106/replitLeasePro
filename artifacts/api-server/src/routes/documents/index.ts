@@ -141,6 +141,41 @@ router.get("/documents/:id", async (req, res): Promise<void> => {
   res.json(GetDocumentResponse.parse(doc));
 });
 
+// POST /documents/:id/reprocess — reset a failed/stuck document and retry
+router.post("/documents/:id/reprocess", async (req, res): Promise<void> => {
+  const params = GetDocumentParams.safeParse(req.params);
+  if (!params.success) {
+    res.status(400).json({ error: params.error.message });
+    return;
+  }
+
+  const [doc] = await db
+    .select()
+    .from(documentsTable)
+    .where(eq(documentsTable.id, params.data.id));
+
+  if (!doc) {
+    res.status(404).json({ error: "Document not found" });
+    return;
+  }
+
+  // Delete existing chunks so we start fresh
+  await db.delete(chunksTable).where(eq(chunksTable.documentId, doc.id));
+
+  // Reset to pending so the processor picks it up
+  await db
+    .update(documentsTable)
+    .set({ status: "pending", errorMessage: null, chunkCount: 0 })
+    .where(eq(documentsTable.id, doc.id));
+
+  // Kick off processing immediately (don't await)
+  processDocument(doc.id, doc.filePath, doc.fileType).catch((err) => {
+    logger.error({ err, docId: doc.id }, "Reprocess failed");
+  });
+
+  res.json({ ok: true, message: "Reprocessing started" });
+});
+
 // DELETE /documents/:id — delete document and chunks
 router.delete("/documents/:id", async (req, res): Promise<void> => {
   const params = DeleteDocumentParams.safeParse(req.params);
