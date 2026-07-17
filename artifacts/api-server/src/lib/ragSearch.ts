@@ -94,98 +94,154 @@ async function fetchSeedChunks(): Promise<RelevantChunk[]> {
   return result.rows as RelevantChunk[];
 }
 
-/**
- * Extract meaningful search keywords from a natural-language query.
- * Strips stopwords and short tokens so we don't match "the", "and", etc.
- */
-function extractKeywords(query: string): string[] {
-  const STOPWORDS = new Set([
-    "a","an","the","and","or","but","in","on","at","to","for","of","with",
-    "by","from","is","are","was","were","be","been","being","have","has",
-    "had","do","does","did","will","would","could","should","may","might",
-    "shall","can","not","this","that","these","those","what","which","who",
-    "how","when","where","about","into","than","then","them","they","their",
-    "there","its","our","your","his","her","we","you","it","as","if","any",
-    "all","each","also","just","more","some","such","only","very","also",
-    "tell","show","give","find","list","please","me","my","i","am",
-  ]);
+const STOPWORDS = new Set([
+  "a","an","the","and","or","but","in","on","at","to","for","of","with",
+  "by","from","is","are","was","were","be","been","being","have","has",
+  "had","do","does","did","will","would","could","should","may","might",
+  "shall","can","not","this","that","these","those","what","which","who",
+  "how","when","where","about","into","than","then","them","they","their",
+  "there","its","our","your","his","her","we","you","it","as","if","any",
+  "all","each","also","just","more","some","such","only","very","also",
+  "tell","show","give","find","list","please","me","my","i","am","look",
+  "same","does","just","need","want","like","does","make","take","know",
+]);
 
-  return query
+/**
+ * Extract keywords from a natural language query, keeping:
+ *  - numbers / section references (e.g. "3.3", "52") — extracted BEFORE
+ *    punctuation is stripped so "3.3" isn't split into "3" and "3"
+ *  - meaningful words (length > 3, not a stopword, not a pure digit string)
+ */
+function extractKeywords(query: string): { words: string[]; numbers: string[] } {
+  // Pull numeric tokens (integers and decimals like "3.3") before any stripping
+  const numbers = [...new Set(query.match(/\b\d+(?:\.\d+)?\b/g) ?? [])].slice(0, 6);
+
+  const words = query
     .replace(/[^a-zA-Z0-9\s]/g, " ")
     .split(/\s+/)
     .map((w) => w.toLowerCase())
-    .filter((w) => w.length > 3 && !STOPWORDS.has(w))
-    .slice(0, 10);
+    .filter((w) => w.length > 3 && !STOPWORDS.has(w) && !/^\d+$/.test(w))
+    .filter((v, i, a) => a.indexOf(v) === i)
+    .slice(0, 8);
+
+  return { words, numbers };
 }
 
 /**
- * Keyword-based chunk search using OR-logic FTS so multi-term natural-language
- * queries find chunks containing ANY key term, ranked by how many they match.
- * Falls back to ILIKE if FTS produces no results.
+ * Keyword-based chunk search.
+ *
+ * Two parallel passes run every time:
+ *  1. FTS (OR logic) — finds chunks matching any meaningful word term,
+ *     ranked by how many they hit.
+ *  2. Number ILIKE — explicitly searches for any numeric tokens from the query
+ *     (e.g. "3.3", "52") so section-number references are never dropped.
+ *
+ * Results from both passes are merged before returning.
  */
 async function fetchKeywordChunks(query: string, limit: number): Promise<RelevantChunk[]> {
   try {
-    const keywords = extractKeywords(query);
-    if (keywords.length === 0) return [];
+    const { words, numbers } = extractKeywords(query);
 
-    // Build an OR-based tsquery: term1 | term2 | term3 ...
-    // This ensures a chunk matching "expansion" scores even if it lacks "peraton".
-    const tsQueryStr = keywords.join(" | ");
+    const [ftsRows, numberRows] = await Promise.all([
+      // --- Pass 1: OR-logic FTS over meaningful words ---
+      (async (): Promise<RelevantChunk[]> => {
+        if (words.length === 0) return [];
 
-    const ftsResult = await db.execute(sql`
-      SELECT
-        c.document_id   AS "documentId",
-        d.filename,
-        d.original_name AS "originalName",
-        c.content,
-        c.chunk_index   AS "chunkIndex",
-        ts_rank(
-          to_tsvector('english', c.content),
-          to_tsquery('english', ${tsQueryStr})
-        ) AS rank
-      FROM chunks c
-      JOIN documents d ON d.id = c.document_id
-      WHERE d.status = 'ready'
-        AND LENGTH(c.content) > 0
-        AND to_tsvector('english', c.content) @@ to_tsquery('english', ${tsQueryStr})
-      ORDER BY rank DESC
-      LIMIT ${limit}
-    `);
+        const tsQueryStr = words.join(" | ");
+        try {
+          const result = await db.execute(sql`
+            SELECT
+              c.document_id   AS "documentId",
+              d.filename,
+              d.original_name AS "originalName",
+              c.content,
+              c.chunk_index   AS "chunkIndex",
+              ts_rank(
+                to_tsvector('english', c.content),
+                to_tsquery('english', ${tsQueryStr})
+              ) AS rank
+            FROM chunks c
+            JOIN documents d ON d.id = c.document_id
+            WHERE d.status = 'ready'
+              AND LENGTH(c.content) > 0
+              AND to_tsvector('english', c.content) @@ to_tsquery('english', ${tsQueryStr})
+            ORDER BY rank DESC
+            LIMIT ${limit}
+          `);
 
-    if (ftsResult.rows.length > 0) {
-      return ftsResult.rows as RelevantChunk[];
+          if (result.rows.length > 0) return result.rows as RelevantChunk[];
+        } catch (_ftsErr) {
+          // FTS parse error — fall through to ILIKE
+        }
+
+        // ILIKE fallback for words
+        const conditions = words
+          .map((kw) => `c.content ILIKE '%${kw.replace(/'/g, "''")}%'`)
+          .join(" OR ");
+        const countExpr = words
+          .map((kw) => `(CASE WHEN c.content ILIKE '%${kw.replace(/'/g, "''")}%' THEN 1 ELSE 0 END)`)
+          .join(" + ");
+
+        const fb = await db.execute(sql.raw(`
+          SELECT
+            c.document_id   AS "documentId",
+            d.filename,
+            d.original_name AS "originalName",
+            c.content,
+            c.chunk_index   AS "chunkIndex",
+            (${countExpr})::float / 10.0 AS rank
+          FROM chunks c
+          JOIN documents d ON d.id = c.document_id
+          WHERE d.status = 'ready'
+            AND LENGTH(c.content) > 0
+            AND (${conditions})
+          ORDER BY rank DESC, c.document_id, c.chunk_index
+          LIMIT ${limit}
+        `));
+        return fb.rows as RelevantChunk[];
+      })(),
+
+      // --- Pass 2: ILIKE for numeric/section-number tokens ---
+      // "3.3" → ILIKE '%3.3%'; "52" → ILIKE '%52%'
+      // This guarantees "Look at Sections 3.3 and 52" actually finds those sections.
+      (async (): Promise<RelevantChunk[]> => {
+        if (numbers.length === 0) return [];
+
+        const numConditions = numbers
+          .map((n) => `c.content ILIKE '%${n.replace(/'/g, "''")}%'`)
+          .join(" OR ");
+        const numCountExpr = numbers
+          .map((n) => `(CASE WHEN c.content ILIKE '%${n.replace(/'/g, "''")}%' THEN 1 ELSE 0 END)`)
+          .join(" + ");
+
+        const result = await db.execute(sql.raw(`
+          SELECT
+            c.document_id   AS "documentId",
+            d.filename,
+            d.original_name AS "originalName",
+            c.content,
+            c.chunk_index   AS "chunkIndex",
+            (${numCountExpr})::float / 10.0 AS rank
+          FROM chunks c
+          JOIN documents d ON d.id = c.document_id
+          WHERE d.status = 'ready'
+            AND LENGTH(c.content) > 0
+            AND (${numConditions})
+          ORDER BY rank DESC, c.document_id, c.chunk_index
+          LIMIT ${limit}
+        `));
+        return result.rows as RelevantChunk[];
+      })(),
+    ]);
+
+    // Merge: number hits first (most targeted), then FTS/word hits
+    const seen = new Set<string>();
+    const merged: RelevantChunk[] = [];
+    for (const row of [...numberRows, ...ftsRows]) {
+      const k = `${row.documentId}:${row.chunkIndex}`;
+      if (!seen.has(k)) { seen.add(k); merged.push(row); }
     }
-
-    // ILIKE fallback: catches proper nouns / abbreviations the stemmer misses
-    if (keywords.length === 0) return [];
-
-    const conditions = keywords
-      .map((kw) => `c.content ILIKE '%${kw.replace(/'/g, "''")}%'`)
-      .join(" OR ");
-
-    // Count how many keyword conditions match each row so we can rank by relevance
-    const countExpr = keywords
-      .map((kw) => `(CASE WHEN c.content ILIKE '%${kw.replace(/'/g, "''")}%' THEN 1 ELSE 0 END)`)
-      .join(" + ");
-
-    const fallbackResult = await db.execute(sql.raw(`
-      SELECT
-        c.document_id   AS "documentId",
-        d.filename,
-        d.original_name AS "originalName",
-        c.content,
-        c.chunk_index   AS "chunkIndex",
-        (${countExpr})::float / 10.0 AS rank
-      FROM chunks c
-      JOIN documents d ON d.id = c.document_id
-      WHERE d.status = 'ready'
-        AND LENGTH(c.content) > 0
-        AND (${conditions})
-      ORDER BY rank DESC, c.document_id, c.chunk_index
-      LIMIT ${limit}
-    `));
-
-    return fallbackResult.rows as RelevantChunk[];
+    return merged;
   } catch (err) {
     logger.error({ err, query }, "Keyword search error");
     return [];
