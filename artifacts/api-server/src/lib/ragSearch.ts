@@ -57,6 +57,16 @@ export async function searchChunks(query: string, limit = 20): Promise<RelevantC
     }
   }
 
+  // Log per-document breakdown so we can verify the right sections are included
+  const byDocSummary: Record<string, number[]> = {};
+  for (const c of merged) {
+    const label = c.originalName.slice(0, 30);
+    (byDocSummary[label] ??= []).push(c.chunkIndex);
+  }
+  for (const [doc, idxs] of Object.entries(byDocSummary)) {
+    idxs.sort((a, b) => a - b);
+  }
+
   logger.info(
     {
       query: trimmed,
@@ -64,6 +74,7 @@ export async function searchChunks(query: string, limit = 20): Promise<RelevantC
       neighborHits: neighborRows.length,
       seedHits: seedRows.length,
       total: merged.length,
+      byDoc: byDocSummary,
     },
     "RAG chunks assembled",
   );
@@ -201,16 +212,29 @@ async function fetchKeywordChunks(query: string, limit: number): Promise<Relevan
         return fb.rows as RelevantChunk[];
       })(),
 
-      // --- Pass 2: ILIKE for numeric/section-number tokens ---
-      // "3.3" → ILIKE '%3.3%'; "52" → ILIKE '%52%'
-      // This guarantees "Look at Sections 3.3 and 52" actually finds those sections.
+      // --- Pass 2: Section-header ILIKE for numeric tokens ---
+      // Searches for "N." pattern (e.g. "52.Signage", "3.3Option") which is the
+      // standard section-header format in legal docs.  This scores higher than a
+      // bare "%N%" match so actual clause text beats TOC entries that merely list
+      // section numbers.  Limit is generous (3× word limit) so every document gets
+      // a fair share of slots regardless of document_id ordering.
       (async (): Promise<RelevantChunk[]> => {
         if (numbers.length === 0) return [];
 
-        const numConditions = numbers
+        // Two tiers: "N." header match (score 1.0) beats generic "N" match (0.1)
+        const headerConditions = numbers
+          .map((n) => `c.content ILIKE '%${n.replace(/'/g, "''")}.' || '%'`)
+          .join(" OR ");
+        const genericConditions = numbers
           .map((n) => `c.content ILIKE '%${n.replace(/'/g, "''")}%'`)
           .join(" OR ");
-        const numCountExpr = numbers
+
+        // Score: 1.0 per header match + 0.1 per generic match, so section headers
+        // always outrank TOC references to the same number.
+        const headerCountExpr = numbers
+          .map((n) => `(CASE WHEN c.content ILIKE '%${n.replace(/'/g, "''")}.' || '%' THEN 1 ELSE 0 END)`)
+          .join(" + ");
+        const genericCountExpr = numbers
           .map((n) => `(CASE WHEN c.content ILIKE '%${n.replace(/'/g, "''")}%' THEN 1 ELSE 0 END)`)
           .join(" + ");
 
@@ -221,14 +245,14 @@ async function fetchKeywordChunks(query: string, limit: number): Promise<Relevan
             d.original_name AS "originalName",
             c.content,
             c.chunk_index   AS "chunkIndex",
-            (${numCountExpr})::float / 10.0 AS rank
+            ((${headerCountExpr})::float + (${genericCountExpr})::float / 10.0) AS rank
           FROM chunks c
           JOIN documents d ON d.id = c.document_id
           WHERE d.status = 'ready'
             AND LENGTH(c.content) > 0
-            AND (${numConditions})
-          ORDER BY rank DESC, c.document_id, c.chunk_index
-          LIMIT ${limit}
+            AND (${genericConditions})
+          ORDER BY rank DESC
+          LIMIT ${limit * 3}
         `));
         return result.rows as RelevantChunk[];
       })(),
@@ -249,53 +273,40 @@ async function fetchKeywordChunks(query: string, limit: number): Promise<Relevan
 }
 
 /**
- * For each keyword-matched chunk, fetch the chunk immediately before and after
- * it (±1) so clause text that spans a chunk boundary isn't cut off.
+ * For each keyword-matched chunk, fetch a ±WINDOW window of surrounding chunks
+ * so clause text that spans chunk boundaries is never cut off.
  *
- * Additionally, if a document has 3 or more keyword hits (suggesting the answer
- * lives mostly within that document — e.g. a rent roll with many tenants), fetch
- * a larger contiguous slice of that document (up to PER_DOC_EXPANSION_CAP chunks
- * starting from the lowest matched chunk_index).
+ * We expand per-hit rather than per-document so that a TOC chunk that happens
+ * to mention a section number doesn't anchor the expansion at page 1 and
+ * crowd out the actual clause content deep in the document.
  */
 async function fetchNeighborsAndExpansions(
   keywordRows: RelevantChunk[],
 ): Promise<RelevantChunk[]> {
-  const PER_DOC_EXPANSION_CAP = 30;
+  const WINDOW = 3; // fetch chunkIndex ± 3 around each hit
 
-  // Group by document
-  const byDoc = new Map<number, { indices: number[]; row: RelevantChunk }>();
+  if (keywordRows.length === 0) return [];
+
+  // Build one SQL query per document using OR'd index ranges so we minimise
+  // round-trips while still expanding around each individual hit precisely.
+  const byDoc = new Map<number, Set<number>>();
   for (const row of keywordRows) {
-    const existing = byDoc.get(row.documentId);
-    if (existing) {
-      existing.indices.push(row.chunkIndex);
-    } else {
-      byDoc.set(row.documentId, { indices: [row.chunkIndex], row });
+    const wanted = byDoc.get(row.documentId) ?? new Set<number>();
+    for (let i = Math.max(0, row.chunkIndex - WINDOW); i <= row.chunkIndex + WINDOW; i++) {
+      wanted.add(i);
     }
+    byDoc.set(row.documentId, wanted);
   }
 
   const allResults: RelevantChunk[] = [];
 
-  for (const [docId, { indices, row }] of byDoc) {
-    const minIdx = Math.min(...indices);
-    const maxIdx = Math.max(...indices);
-    const hitCount = indices.length;
+  for (const [docId, wantedSet] of byDoc) {
+    const indices = [...wantedSet].sort((a, b) => a - b);
 
-    // Determine the fetch range:
-    // - Always fetch ±1 neighbors around each hit
-    // - If doc has ≥3 hits, pull a full slice from minIdx-1 onward (up to cap)
-    let fetchFrom: number;
-    let fetchCount: number;
-
-    if (hitCount >= 3) {
-      // Document is heavily relevant — pull a wider slice
-      fetchFrom = Math.max(0, minIdx - 1);
-      fetchCount = PER_DOC_EXPANSION_CAP;
-    } else {
-      // Just neighbors: from minIdx-1 to maxIdx+1
-      fetchFrom = Math.max(0, minIdx - 1);
-      fetchCount = maxIdx - fetchFrom + 2; // +2 for the trailing +1 neighbor
-    }
-
+    // Fetch all wanted chunk indexes in a single query via ANY()
+    // Use sql.raw for the index list — these come from our own DB query results
+    // so there is no injection risk, and this avoids Drizzle's per-element
+    // parameterization which generates invalid ANY($1,$2,...) syntax.
     const result = await db.execute(sql`
       SELECT
         c.document_id   AS "documentId",
@@ -307,10 +318,9 @@ async function fetchNeighborsAndExpansions(
       FROM chunks c
       JOIN documents d ON d.id = c.document_id
       WHERE c.document_id = ${docId}
-        AND c.chunk_index >= ${fetchFrom}
+        AND c.chunk_index IN (${sql.raw(indices.join(","))})
         AND LENGTH(c.content) > 0
       ORDER BY c.chunk_index
-      LIMIT ${fetchCount}
     `);
 
     allResults.push(...(result.rows as RelevantChunk[]));
