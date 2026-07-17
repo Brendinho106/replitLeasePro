@@ -95,12 +95,43 @@ async function fetchSeedChunks(): Promise<RelevantChunk[]> {
 }
 
 /**
- * Keyword-based chunk search: FTS via websearch_to_tsquery, falling back to ILIKE.
- * Limit is intentionally high (default 20) to capture multi-tenant tables and
- * long clauses that span many chunks.
+ * Extract meaningful search keywords from a natural-language query.
+ * Strips stopwords and short tokens so we don't match "the", "and", etc.
+ */
+function extractKeywords(query: string): string[] {
+  const STOPWORDS = new Set([
+    "a","an","the","and","or","but","in","on","at","to","for","of","with",
+    "by","from","is","are","was","were","be","been","being","have","has",
+    "had","do","does","did","will","would","could","should","may","might",
+    "shall","can","not","this","that","these","those","what","which","who",
+    "how","when","where","about","into","than","then","them","they","their",
+    "there","its","our","your","his","her","we","you","it","as","if","any",
+    "all","each","also","just","more","some","such","only","very","also",
+    "tell","show","give","find","list","please","me","my","i","am",
+  ]);
+
+  return query
+    .replace(/[^a-zA-Z0-9\s]/g, " ")
+    .split(/\s+/)
+    .map((w) => w.toLowerCase())
+    .filter((w) => w.length > 3 && !STOPWORDS.has(w))
+    .slice(0, 10);
+}
+
+/**
+ * Keyword-based chunk search using OR-logic FTS so multi-term natural-language
+ * queries find chunks containing ANY key term, ranked by how many they match.
+ * Falls back to ILIKE if FTS produces no results.
  */
 async function fetchKeywordChunks(query: string, limit: number): Promise<RelevantChunk[]> {
   try {
+    const keywords = extractKeywords(query);
+    if (keywords.length === 0) return [];
+
+    // Build an OR-based tsquery: term1 | term2 | term3 ...
+    // This ensures a chunk matching "expansion" scores even if it lacks "peraton".
+    const tsQueryStr = keywords.join(" | ");
+
     const ftsResult = await db.execute(sql`
       SELECT
         c.document_id   AS "documentId",
@@ -110,13 +141,13 @@ async function fetchKeywordChunks(query: string, limit: number): Promise<Relevan
         c.chunk_index   AS "chunkIndex",
         ts_rank(
           to_tsvector('english', c.content),
-          websearch_to_tsquery('english', ${query})
+          to_tsquery('english', ${tsQueryStr})
         ) AS rank
       FROM chunks c
       JOIN documents d ON d.id = c.document_id
       WHERE d.status = 'ready'
         AND LENGTH(c.content) > 0
-        AND to_tsvector('english', c.content) @@ websearch_to_tsquery('english', ${query})
+        AND to_tsvector('english', c.content) @@ to_tsquery('english', ${tsQueryStr})
       ORDER BY rank DESC
       LIMIT ${limit}
     `);
@@ -125,18 +156,17 @@ async function fetchKeywordChunks(query: string, limit: number): Promise<Relevan
       return ftsResult.rows as RelevantChunk[];
     }
 
-    // ILIKE fallback: OR across meaningful keywords
-    const keywords = query
-      .replace(/[^a-zA-Z0-9\s]/g, " ")
-      .split(/\s+/)
-      .filter((w) => w.length > 3)
-      .slice(0, 8);
-
+    // ILIKE fallback: catches proper nouns / abbreviations the stemmer misses
     if (keywords.length === 0) return [];
 
     const conditions = keywords
       .map((kw) => `c.content ILIKE '%${kw.replace(/'/g, "''")}%'`)
       .join(" OR ");
+
+    // Count how many keyword conditions match each row so we can rank by relevance
+    const countExpr = keywords
+      .map((kw) => `(CASE WHEN c.content ILIKE '%${kw.replace(/'/g, "''")}%' THEN 1 ELSE 0 END)`)
+      .join(" + ");
 
     const fallbackResult = await db.execute(sql.raw(`
       SELECT
@@ -145,13 +175,13 @@ async function fetchKeywordChunks(query: string, limit: number): Promise<Relevan
         d.original_name AS "originalName",
         c.content,
         c.chunk_index   AS "chunkIndex",
-        0.01            AS rank
+        (${countExpr})::float / 10.0 AS rank
       FROM chunks c
       JOIN documents d ON d.id = c.document_id
       WHERE d.status = 'ready'
         AND LENGTH(c.content) > 0
         AND (${conditions})
-      ORDER BY c.document_id, c.chunk_index
+      ORDER BY rank DESC, c.document_id, c.chunk_index
       LIMIT ${limit}
     `));
 
