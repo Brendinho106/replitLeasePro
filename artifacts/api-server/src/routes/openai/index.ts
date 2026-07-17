@@ -208,7 +208,16 @@ router.post("/openai/conversations/:id/messages", async (req, res): Promise<void
   const recentHistory = history.slice(-10);
 
   // RAG: search for relevant chunks
-  const relevantChunks = await searchChunks(userContent, 8);
+  // Cap total context at ~70 k chars (~17 500 tokens) so we stay well under
+  // any model's TPM limit. Chunks are ordered by relevance (keyword hits first,
+  // neighbours next, seeds last) so we keep the most targeted content.
+  const MAX_CONTEXT_CHARS = 70_000;
+  const rawChunks = await searchChunks(userContent, 8);
+  let accumulated = 0;
+  const relevantChunks = rawChunks.filter((c) => {
+    accumulated += c.content.length;
+    return accumulated <= MAX_CONTEXT_CHARS;
+  });
   const { context, legend } = buildContext(relevantChunks);
 
   req.log.info(
@@ -239,7 +248,7 @@ router.post("/openai/conversations/:id/messages", async (req, res): Promise<void
 
   try {
     const stream = await openai.chat.completions.create({
-      model: "gpt-4o",
+      model: "gpt-4.1-mini",
       max_tokens: 4096,
       messages: chatMessages,
       stream: true,
