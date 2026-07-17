@@ -1,7 +1,7 @@
 import { Router, type IRouter } from "express";
 import multer from "multer";
 import path from "path";
-import { mkdir } from "fs/promises";
+import { mkdir, unlink } from "fs/promises";
 import { eq, sql, count } from "drizzle-orm";
 import { db } from "@workspace/db";
 import { documentsTable, chunksTable } from "@workspace/db";
@@ -14,6 +14,7 @@ import {
 } from "@workspace/api-zod";
 import { extractText, chunkText } from "../../lib/docProcessor";
 import { logger } from "../../lib/logger";
+import { objectStorageClient } from "../../lib/objectStorage";
 
 const router: IRouter = Router();
 
@@ -55,19 +56,43 @@ router.post("/documents/upload", upload.single("file"), async (req, res): Promis
   }
 
   const ext = path.extname(req.file.originalname).toLowerCase().replace(".", "");
+
+  // Upload to GCS so the file survives server restarts / redeploys.
+  // Store a relative GCS key (e.g. "uploads/timestamp_name.pdf") as filePath.
+  const gcsKey = `uploads/${req.file.filename}`;
+  const bucketId = process.env["DEFAULT_OBJECT_STORAGE_BUCKET_ID"];
+  if (!bucketId) {
+    res.status(500).json({ error: "Object storage not configured" });
+    return;
+  }
+
+  try {
+    await objectStorageClient
+      .bucket(bucketId)
+      .upload(req.file.path, { destination: gcsKey });
+    logger.info({ gcsKey }, "File uploaded to GCS");
+  } catch (err) {
+    logger.error({ err }, "GCS upload failed");
+    res.status(500).json({ error: "Failed to store file" });
+    return;
+  } finally {
+    // Always remove the local temp copy — GCS is the source of truth
+    unlink(req.file.path).catch(() => {});
+  }
+
   const [doc] = await db
     .insert(documentsTable)
     .values({
       filename: req.file.filename,
       originalName: req.file.originalname,
       fileType: ext,
-      filePath: req.file.path,
+      filePath: gcsKey,   // GCS key, not local path
       status: "pending",
     })
     .returning();
 
   // Process asynchronously (don't await)
-  processDocument(doc.id, req.file.path, ext).catch((err) => {
+  processDocument(doc.id, gcsKey, ext).catch((err) => {
     logger.error({ err, docId: doc.id }, "Document processing failed");
   });
 

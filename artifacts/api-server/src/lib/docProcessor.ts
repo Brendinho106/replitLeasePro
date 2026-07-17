@@ -1,9 +1,40 @@
-import { readFile, unlink } from "fs/promises";
+import { readFile, unlink, writeFile } from "fs/promises";
 import { createRequire } from "module";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import path from "path";
+import { tmpdir } from "os";
+import { randomUUID } from "crypto";
 import { logger } from "./logger";
+import { objectStorageClient } from "./objectStorage";
+
+/**
+ * If filePath is a GCS key (relative, no leading slash) download it to a
+ * temp file and return { localPath, cleanup }.  If it's already a local
+ * absolute path just return it with a no-op cleanup.
+ */
+export async function resolveLocalPath(
+  filePath: string,
+  fileType: string,
+): Promise<{ localPath: string; cleanup: () => Promise<void> }> {
+  // Absolute path → already on local disk (dev environment or legacy)
+  if (path.isAbsolute(filePath)) {
+    return { localPath: filePath, cleanup: async () => {} };
+  }
+
+  // Relative path → GCS object key (e.g. "uploads/timestamp_name.pdf")
+  const bucketId = process.env["DEFAULT_OBJECT_STORAGE_BUCKET_ID"];
+  if (!bucketId) throw new Error("DEFAULT_OBJECT_STORAGE_BUCKET_ID not set");
+
+  const tmpPath = path.join(tmpdir(), `${randomUUID()}.${fileType}`);
+  logger.info({ filePath, tmpPath }, "Downloading file from GCS for processing");
+  await objectStorageClient.bucket(bucketId).file(filePath).download({ destination: tmpPath });
+
+  return {
+    localPath: tmpPath,
+    cleanup: () => unlink(tmpPath).catch(() => {}),
+  };
+}
 
 const require = createRequire(import.meta.url);
 const execFileAsync = promisify(execFile);
@@ -19,8 +50,19 @@ export type ParsedDoc = {
 
 /**
  * Extract text from a file based on its extension.
+ * filePath may be an absolute local path OR a GCS object key (relative path).
+ * GCS keys are downloaded to a temp file first, then cleaned up automatically.
  */
 export async function extractText(filePath: string, fileType: string): Promise<string> {
+  const { localPath, cleanup } = await resolveLocalPath(filePath, fileType);
+  try {
+    return await extractTextLocal(localPath, fileType);
+  } finally {
+    await cleanup();
+  }
+}
+
+async function extractTextLocal(filePath: string, fileType: string): Promise<string> {
   const ext = fileType.toLowerCase();
 
   if (ext === "pdf") {
