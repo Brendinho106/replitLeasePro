@@ -11,6 +11,14 @@ if (!process.env.DATABASE_URL) {
 }
 
 export const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+
+// Prevent unhandled 'error' events on idle pool clients (e.g. "terminating
+// connection due to administrator command" during DB maintenance or publish)
+// from crashing the Node process.  The pool will automatically reconnect.
+pool.on("error", (err) => {
+  console.error("[db-pool] idle client error (non-fatal):", err.message);
+});
+
 export const db = drizzle(pool, { schema });
 
 export * from "./schema";
