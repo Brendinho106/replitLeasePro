@@ -1,29 +1,27 @@
 ---
 name: LeasePro RAG Architecture
-description: Key decisions for the LeasePro lease intelligence app — RAG approach, auth, and upload pipeline
+description: Key decisions and quirks for the LeasePro RAG pipeline (OCR, chunking, concurrency, DB).
 ---
 
-## RAG without embeddings
-PostgreSQL `tsvector`/`tsquery` full-text search is used for chunk retrieval instead of vector embeddings. The OpenAI embeddings API is not available via Replit AI Integrations. Falls back to ILIKE when FTS returns no results.
+## RAG approach
+- Full-text search via PostgreSQL tsvector (not embeddings)
+- OpenAI key used directly (not Replit AI Integrations proxy)
+- Model: gpt-4.1-mini with 70k-char context cap
 
-**Why:** OpenAI Replit AI Integration doesn't support the embeddings API. User provided their own `OPENAI_API_KEY` for chat completions (gpt-4o).
+## OCR pipeline
+- pdf-parse for text extraction first; falls back to ocrmypdf if text is sparse or garbage
+- isGarbageText() detects repeated-char runs (>25% threshold) and forces OCR
+- Whole-doc OCR: 3-min timeout → on timeout falls back to page-by-page
+- Page-by-page OCR: 3-min per-page timeout (raised from 90s after CPU-starvation issue)
+- Documents process **sequentially** (not concurrently) — OCR is CPU-heavy; parallel runs cause every page to hit the timeout ceiling
 
-**How to apply:** If better semantic search is needed later, add pgvector extension and use OpenAI embeddings directly via the user's API key.
+**Why sequential matters:** when two OCR jobs run simultaneously they starve each other. Each page appears to time out not because Tesseract is slow but because the CPU is split. Fix: `await processOne(doc)` inside the startup loop, not fire-and-forget.
 
-## Document processing
-- Async: upload returns immediately, processing happens in background
-- Supported: PDF (pdf-parse), Excel/CSV (xlsx), Word (mammoth), TXT
-- `pdf-parse`, `xlsx`, `mammoth` are externalized in esbuild (not bundled) — they use CJS/native patterns that break when bundled
-- Chunks: ~600 chars, 100-char overlap, break at paragraph/sentence boundaries
+## Known un-ingestible doc patterns
+- DocuSign/Adobe Sign executed leases often have content-extraction security flags that prevent ocrmypdf from reading page image data — whole-doc AND page-by-page both time out at the hard limit
+- Image-only stacking plans (floor plans) yield no text even with OCR — need source files with a text layer
+- Workaround for signed PDFs: print-to-PDF in Acrobat strips the security restrictions
 
-## Auth
-- Clerk (Replit-managed) with proxy middleware
-- Cookie-based session for web (no Bearer tokens needed in frontend fetch calls)
-
-## File upload
-- Raw `fetch + FormData` POST to `/api/documents/upload` — NOT via generated hooks
-- Multer handles multipart on server side
-
-## Streaming chat
-- SSE via `ReadableStream` / `getReader()` in frontend (not EventSource, which only supports GET)
-- Each chunk: `data: {"content": "..."}`, final: `data: {"done": true}`
+## Startup recovery
+- On startup, server resets any `processing` docs → `pending` then processes them sequentially
+- Pool unhandled error events (`terminating connection`) previously crashed Node mid-OCR; fixed with `pool.on("error", ...)` handler
