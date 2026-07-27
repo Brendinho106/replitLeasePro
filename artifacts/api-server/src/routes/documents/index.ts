@@ -166,6 +166,106 @@ router.get("/documents/:id", async (req, res): Promise<void> => {
   res.json(GetDocumentResponse.parse(doc));
 });
 
+// GET /documents/:id/download — generate a signed GCS URL and redirect for download
+router.get("/documents/:id/download", async (req, res): Promise<void> => {
+  const params = GetDocumentParams.safeParse(req.params);
+  if (!params.success) {
+    res.status(400).json({ error: params.error.message });
+    return;
+  }
+
+  const [doc] = await db
+    .select()
+    .from(documentsTable)
+    .where(eq(documentsTable.id, params.data.id));
+
+  if (!doc) {
+    res.status(404).json({ error: "Document not found" });
+    return;
+  }
+
+  const bucketId = process.env["DEFAULT_OBJECT_STORAGE_BUCKET_ID"];
+  if (!bucketId) {
+    res.status(500).json({ error: "Object storage not configured" });
+    return;
+  }
+
+  // doc.filePath is a relative GCS key like "uploads/timestamp_name.pdf"
+  const gcsKey = doc.filePath;
+  const { Storage } = await import("@google-cloud/storage");
+  const SIDECAR = "http://127.0.0.1:1106";
+  const storage = new Storage({
+    credentials: {
+      audience: "replit",
+      subject_token_type: "access_token",
+      token_url: `${SIDECAR}/token`,
+      type: "external_account",
+      credential_source: {
+        url: `${SIDECAR}/credential`,
+        format: { type: "json", subject_token_field_name: "access_token" },
+      },
+      universe_domain: "googleapis.com",
+    },
+    projectId: "",
+  });
+
+  const signResp = await fetch(
+    `${SIDECAR}/object-storage/signed-object-url`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        bucket_name: bucketId,
+        object_name: gcsKey,
+        method: "GET",
+        expires_at: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+      }),
+      signal: AbortSignal.timeout(30_000),
+    },
+  );
+
+  if (!signResp.ok) {
+    res.status(500).json({ error: "Failed to generate download URL" });
+    return;
+  }
+
+  const { signed_url } = await signResp.json() as { signed_url: string };
+
+  // Redirect — browser will follow and download the file
+  res.redirect(302, signed_url);
+});
+
+// POST /documents/admin/register — re-register an existing GCS file as an error record
+// Used to restore documents that were deleted from DB but whose GCS files still exist.
+router.post("/documents/admin/register", async (req, res): Promise<void> => {
+  const { gcsKey, originalName, fileType } = req.body as {
+    gcsKey?: string;
+    originalName?: string;
+    fileType?: string;
+  };
+  if (!gcsKey || !originalName || !fileType) {
+    res.status(400).json({ error: "gcsKey, originalName, and fileType are required" });
+    return;
+  }
+
+  const filename = gcsKey.split("/").pop() ?? gcsKey;
+
+  const [doc] = await db
+    .insert(documentsTable)
+    .values({
+      filename,
+      originalName,
+      fileType,
+      filePath: gcsKey,
+      status: "error",
+      errorMessage:
+        "No readable text could be extracted. This PDF likely has content-extraction restrictions set by the signing platform (DocuSign/Adobe Sign). Open in Acrobat → Print → Save as PDF to remove restrictions, then re-upload.",
+    })
+    .returning();
+
+  res.status(201).json({ id: doc.id, originalName: doc.originalName, status: doc.status });
+});
+
 // POST /documents/:id/reprocess — reset a failed/stuck document and retry
 router.post("/documents/:id/reprocess", async (req, res): Promise<void> => {
   const params = GetDocumentParams.safeParse(req.params);
