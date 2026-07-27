@@ -97,7 +97,7 @@ async function extractTextLocal(filePath: string, fileType: string): Promise<str
 async function extractPdf(filePath: string): Promise<string> {
   // Use createRequire to reliably load this CJS module in an ESM context
   // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const pdfParse = require("pdf-parse") as (buf: Buffer) => Promise<{ text: string }>;
+  const pdfParse = require("pdf-parse") as (buf: Buffer) => Promise<{ text: string; numpages: number }>;
 
   const buf = await readFile(filePath);
   const data = await pdfParse(buf);
@@ -118,9 +118,9 @@ async function extractPdf(filePath: string): Promise<string> {
 const OCR_WHOLE_DOC_TIMEOUT_MS = 3 * 60 * 1000;
 
 // Per-page timeout used in the page-by-page fallback.  Most pages OCR in
-// a few seconds; 45 s is generous but still prevents one bad page blocking
+// a few seconds; 90 s is generous but still prevents one bad page blocking
 // the whole document.
-const OCR_PER_PAGE_TIMEOUT_MS = 45 * 1000;
+const OCR_PER_PAGE_TIMEOUT_MS = 90 * 1000;
 
 /**
  * Run ocrmypdf on the whole PDF first (fast path, 3-minute cap).
@@ -182,14 +182,14 @@ async function runOcrPageByPage(
   filePath: string,
   pdfParse: (buf: Buffer) => Promise<{ text: string; numpages: number }>,
 ): Promise<string> {
-  // Get page count via pdfinfo (fast, no full parse)
+  // Get page count from pdf-parse metadata (already available, no extra tool needed)
   let numPages = 1;
   try {
-    const { stdout } = await execFileAsync("pdfinfo", [filePath], { timeout: 10_000 });
-    const match = stdout.match(/^Pages:\s+(\d+)/m);
-    if (match) numPages = parseInt(match[1], 10);
+    const buf = await readFile(filePath);
+    const meta = await pdfParse(buf);
+    numPages = meta.numpages ?? 1;
   } catch {
-    logger.warn({ filePath }, "pdfinfo failed — defaulting to 1 page for page-by-page OCR");
+    logger.warn({ filePath }, "pdf-parse metadata read failed — defaulting to 1 page for page-by-page OCR");
   }
 
   logger.info({ filePath, numPages }, "Starting page-by-page OCR");
