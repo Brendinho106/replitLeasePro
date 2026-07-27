@@ -113,21 +113,26 @@ async function extractPdf(filePath: string): Promise<string> {
   return runOcrAndExtract(filePath, pdfParse);
 }
 
-// Hard cap on OCR: 5 minutes. Some scanned PDFs cause ocrmypdf to hang
-// indefinitely; without this the server cycles in a restart loop forever.
-const OCR_TIMEOUT_MS = 5 * 60 * 1000;
+// Whole-document OCR timeout: 3 minutes.  If the full doc finishes within
+// this window we're done quickly.  If it hangs we fall back to page-by-page.
+const OCR_WHOLE_DOC_TIMEOUT_MS = 3 * 60 * 1000;
+
+// Per-page timeout used in the page-by-page fallback.  Most pages OCR in
+// a few seconds; 45 s is generous but still prevents one bad page blocking
+// the whole document.
+const OCR_PER_PAGE_TIMEOUT_MS = 45 * 1000;
 
 /**
- * Run ocrmypdf on a scanned PDF, then extract the resulting text.
- * Cleans up the temporary OCR'd file when done.
- * Enforces a hard 5-minute timeout — if ocrmypdf hangs, it is killed and
- * the function returns an empty string (triggering the "no text" error path).
+ * Run ocrmypdf on the whole PDF first (fast path, 3-minute cap).
+ * If the whole-doc run times out, fall back to page-by-page OCR so we can
+ * still extract text from the pages that Tesseract can handle.
  */
 async function runOcrAndExtract(
   filePath: string,
-  pdfParse: (buf: Buffer) => Promise<{ text: string }>,
+  pdfParse: (buf: Buffer) => Promise<{ text: string; numpages: number }>,
 ): Promise<string> {
   const ocrOutputPath = filePath.replace(/\.pdf$/i, "_ocr.pdf");
+  let wholeDocTimedOut = false;
 
   try {
     // --skip-text: skip pages that already have a text layer (no re-OCR on mixed docs)
@@ -141,12 +146,11 @@ async function runOcrAndExtract(
       filePath,
       ocrOutputPath,
     ], {
-      timeout: OCR_TIMEOUT_MS,
-      killSignal: "SIGKILL", // ensure the process is actually killed on timeout
+      timeout: OCR_WHOLE_DOC_TIMEOUT_MS,
+      killSignal: "SIGKILL",
     });
 
-    logger.info({ ocrOutputPath }, "ocrmypdf completed successfully");
-
+    logger.info({ ocrOutputPath }, "ocrmypdf whole-doc completed successfully");
     const ocrBuf = await readFile(ocrOutputPath);
     const ocrData = await pdfParse(ocrBuf);
     return ocrData.text.trim();
@@ -154,14 +158,84 @@ async function runOcrAndExtract(
     const e = err as Record<string, unknown>;
     const isTimeout = e["killed"] === true || e["signal"] === "SIGKILL";
     if (isTimeout) {
-      logger.warn({ filePath }, "ocrmypdf timed out after 5 minutes — marking as unreadable");
-      return ""; // falls through to the "no text extracted" error path
+      logger.warn({ filePath }, "Whole-doc OCR timed out after 3 minutes — falling back to page-by-page");
+      wholeDocTimedOut = true;
+    } else {
+      throw err; // real error — let the caller handle it
     }
-    throw err; // real error — let the caller handle it
   } finally {
-    // Always clean up the temp file
-    unlink(ocrOutputPath).catch(() => {/* ignore if it doesn't exist */});
+    unlink(ocrOutputPath).catch(() => {});
   }
+
+  if (!wholeDocTimedOut) return "";
+
+  // --- Page-by-page fallback ---
+  return runOcrPageByPage(filePath, pdfParse);
+}
+
+/**
+ * OCR one page at a time.  Pages that timeout or error are skipped; the rest
+ * are concatenated.  Logs per-page progress so we can see how many pages
+ * each document yields.
+ */
+async function runOcrPageByPage(
+  filePath: string,
+  pdfParse: (buf: Buffer) => Promise<{ text: string; numpages: number }>,
+): Promise<string> {
+  // Get page count via pdfinfo (fast, no full parse)
+  let numPages = 1;
+  try {
+    const { stdout } = await execFileAsync("pdfinfo", [filePath], { timeout: 10_000 });
+    const match = stdout.match(/^Pages:\s+(\d+)/m);
+    if (match) numPages = parseInt(match[1], 10);
+  } catch {
+    logger.warn({ filePath }, "pdfinfo failed — defaulting to 1 page for page-by-page OCR");
+  }
+
+  logger.info({ filePath, numPages }, "Starting page-by-page OCR");
+
+  const texts: string[] = [];
+  let successCount = 0;
+  let skipCount = 0;
+
+  for (let page = 1; page <= numPages; page++) {
+    const pageOutputPath = filePath.replace(/\.pdf$/i, `_ocr_p${page}.pdf`);
+    try {
+      await execFileAsync("ocrmypdf", [
+        "--skip-text",
+        "--output-type", "pdf",
+        "--quiet",
+        "--jobs", "1",
+        "--pages", String(page),
+        filePath,
+        pageOutputPath,
+      ], {
+        timeout: OCR_PER_PAGE_TIMEOUT_MS,
+        killSignal: "SIGKILL",
+      });
+
+      const ocrBuf = await readFile(pageOutputPath);
+      const ocrData = await pdfParse(ocrBuf);
+      const pageText = ocrData.text.trim();
+      if (pageText.length > 0) {
+        texts.push(pageText);
+        successCount++;
+      } else {
+        skipCount++;
+      }
+    } catch (err) {
+      const e = err as Record<string, unknown>;
+      const isTimeout = e["killed"] === true || e["signal"] === "SIGKILL";
+      logger.warn({ filePath, page, numPages, isTimeout },
+        isTimeout ? "Page OCR timed out — skipping" : "Page OCR failed — skipping");
+      skipCount++;
+    } finally {
+      unlink(pageOutputPath).catch(() => {});
+    }
+  }
+
+  logger.info({ filePath, numPages, successCount, skipCount }, "Page-by-page OCR complete");
+  return texts.join("\n\n");
 }
 
 async function extractSpreadsheet(filePath: string, ext: string): Promise<string> {
