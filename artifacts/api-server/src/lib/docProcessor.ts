@@ -43,6 +43,19 @@ const execFileAsync = promisify(execFile);
 // Scanned PDFs typically return whitespace-only or near-empty strings.
 const MIN_TEXT_LENGTH = 100;
 
+/**
+ * Returns true if the text looks like garbled PDF encoding output — e.g.
+ * "DoDDDDDDDDDD...FlFlFlFlFl...eiiiiiiiiii" — rather than real prose.
+ * These strings pass the length check but contain mostly repeated-character
+ * runs and should be sent through OCR instead of being stored as-is.
+ */
+function isGarbageText(text: string): boolean {
+  // Count characters that appear in runs of 5 or more
+  const runs = text.match(/(.)\1{4,}/g) ?? [] as string[];
+  const runCharCount = (runs as string[]).reduce((sum: number, r: string) => sum + r.length, 0);
+  return runCharCount / text.length > 0.25;
+}
+
 export type ParsedDoc = {
   text: string;
   metadata: Record<string, string>;
@@ -90,14 +103,13 @@ async function extractPdf(filePath: string): Promise<string> {
   const data = await pdfParse(buf);
   const text = data.text.trim();
 
-  // If the PDF has a usable text layer, return it directly
-  if (text.length >= MIN_TEXT_LENGTH) {
+  // If the PDF has a usable, non-garbage text layer, return it directly
+  if (text.length >= MIN_TEXT_LENGTH && !isGarbageText(text)) {
     return text;
   }
 
-  // Text layer is absent or too sparse — this is likely a scanned PDF.
-  // Run ocrmypdf to add a text layer via Tesseract, then re-extract.
-  logger.info({ filePath, textLength: text.length }, "Sparse text layer detected — running OCR");
+  const reason = text.length < MIN_TEXT_LENGTH ? "sparse text layer" : "garbage text detected";
+  logger.info({ filePath, textLength: text.length, reason }, "Running OCR");
   return runOcrAndExtract(filePath, pdfParse);
 }
 
@@ -179,7 +191,12 @@ async function extractWord(filePath: string): Promise<string> {
  * Split text into overlapping chunks of ~600 characters.
  */
 export function chunkText(text: string, chunkSize = 600, overlap = 100): string[] {
-  const cleaned = text.replace(/\r\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+  const cleaned = text
+    .replace(/\0/g, "")                       // strip null bytes (PostgreSQL rejects them)
+    .replace(/[\x01-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "") // strip other non-printable control chars
+    .replace(/\r\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 
   if (cleaned.length <= chunkSize) {
     return [cleaned];
