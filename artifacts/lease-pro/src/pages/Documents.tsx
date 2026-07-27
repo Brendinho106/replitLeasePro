@@ -2,7 +2,7 @@ import { useCallback, useState } from "react";
 import { useListDocuments, useGetDocumentStats, useDeleteDocument, getListDocumentsQueryKey, getGetDocumentStatsQueryKey } from "@workspace/api-client-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Loader2, FileText, Trash2, UploadCloud, AlertCircle, CheckCircle2, Clock, FileSpreadsheet, File } from "lucide-react";
+import { Loader2, FileText, Trash2, UploadCloud, AlertCircle, CheckCircle2, Clock, FileSpreadsheet, File, Download } from "lucide-react";
 import { useDropzone } from "react-dropzone";
 import { format } from "date-fns";
 import { useQueryClient } from "@tanstack/react-query";
@@ -212,6 +212,17 @@ export function Documents() {
                     {doc.status}
                   </Badge>
                   
+                  <a
+                    href={`${basePath}/api/documents/${doc.id}/download`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    title="Download original file"
+                  >
+                    <Button variant="ghost" size="icon" className="text-muted-foreground hover:text-primary h-8 w-8">
+                      <Download className="w-4 h-4" />
+                    </Button>
+                  </a>
+
                   <Button 
                     variant="ghost" 
                     size="icon" 
