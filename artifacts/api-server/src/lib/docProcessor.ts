@@ -101,9 +101,15 @@ async function extractPdf(filePath: string): Promise<string> {
   return runOcrAndExtract(filePath, pdfParse);
 }
 
+// Hard cap on OCR: 5 minutes. Some scanned PDFs cause ocrmypdf to hang
+// indefinitely; without this the server cycles in a restart loop forever.
+const OCR_TIMEOUT_MS = 5 * 60 * 1000;
+
 /**
  * Run ocrmypdf on a scanned PDF, then extract the resulting text.
  * Cleans up the temporary OCR'd file when done.
+ * Enforces a hard 5-minute timeout — if ocrmypdf hangs, it is killed and
+ * the function returns an empty string (triggering the "no text" error path).
  */
 async function runOcrAndExtract(
   filePath: string,
@@ -114,19 +120,32 @@ async function runOcrAndExtract(
   try {
     // --skip-text: skip pages that already have a text layer (no re-OCR on mixed docs)
     // --output-type pdf: standard PDF output
+    // --jobs 1: single-threaded to avoid OOM on constrained production instances
     await execFileAsync("ocrmypdf", [
       "--skip-text",
       "--output-type", "pdf",
       "--quiet",
+      "--jobs", "1",
       filePath,
       ocrOutputPath,
-    ]);
+    ], {
+      timeout: OCR_TIMEOUT_MS,
+      killSignal: "SIGKILL", // ensure the process is actually killed on timeout
+    });
 
     logger.info({ ocrOutputPath }, "ocrmypdf completed successfully");
 
     const ocrBuf = await readFile(ocrOutputPath);
     const ocrData = await pdfParse(ocrBuf);
     return ocrData.text.trim();
+  } catch (err) {
+    const e = err as Record<string, unknown>;
+    const isTimeout = e["killed"] === true || e["signal"] === "SIGKILL";
+    if (isTimeout) {
+      logger.warn({ filePath }, "ocrmypdf timed out after 5 minutes — marking as unreadable");
+      return ""; // falls through to the "no text extracted" error path
+    }
+    throw err; // real error — let the caller handle it
   } finally {
     // Always clean up the temp file
     unlink(ocrOutputPath).catch(() => {/* ignore if it doesn't exist */});
