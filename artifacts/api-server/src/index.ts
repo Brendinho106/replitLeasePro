@@ -60,9 +60,9 @@ async function processPendingDocuments(): Promise<void> {
       .set({ status: "processing" })
       .where(eq(documentsTable.id, doc.id));
 
-    processOne(doc).catch((e) =>
-      logger.error({ err: e, docId: doc.id }, "Startup processing error"),
-    );
+    // Process sequentially — OCR is CPU-heavy and running docs concurrently
+    // causes every page to time out by starving the other job of CPU.
+    await processOne(doc);
   }
 }
 

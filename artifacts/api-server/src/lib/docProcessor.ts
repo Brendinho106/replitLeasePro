@@ -118,9 +118,9 @@ async function extractPdf(filePath: string): Promise<string> {
 const OCR_WHOLE_DOC_TIMEOUT_MS = 3 * 60 * 1000;
 
 // Per-page timeout used in the page-by-page fallback.  Most pages OCR in
-// a few seconds; 90 s is generous but still prevents one bad page blocking
-// the whole document.
-const OCR_PER_PAGE_TIMEOUT_MS = 90 * 1000;
+// a few seconds; 3 minutes gives even high-res scanned pages a fair chance
+// when running without CPU competition from other concurrent OCR jobs.
+const OCR_PER_PAGE_TIMEOUT_MS = 3 * 60 * 1000;
 
 /**
  * Run ocrmypdf on the whole PDF first (fast path, 3-minute cap).
