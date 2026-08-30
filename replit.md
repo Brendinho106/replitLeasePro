@@ -11,6 +11,10 @@ A RAG-powered commercial lease intelligence platform for property managers. Uplo
 - `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
 - `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
 - Required env: `DATABASE_URL`, `OPENAI_API_KEY`, `CLERK_SECRET_KEY`, `CLERK_PUBLISHABLE_KEY`, `VITE_CLERK_PUBLISHABLE_KEY`
+- SharePoint sync (optional, stub defaults until configured):
+  - `SHAREPOINT_SITE_URL` — e.g. `https://contoso.sharepoint.com/sites/leasing` (defaults to stub URL)
+  - `SHAREPOINT_ROOT_FOLDER` — e.g. `Shared Documents/Leases` (defaults to stub path)
+  - `MICROSOFT_TENANT_ID`, `MICROSOFT_CLIENT_ID`, `MICROSOFT_CLIENT_SECRET` — Azure app credentials for Graph API
 
 ## Stack
 
@@ -26,8 +30,11 @@ A RAG-powered commercial lease intelligence platform for property managers. Uplo
 ## Where things live
 
 - `lib/api-spec/openapi.yaml` — API contract (source of truth)
-- `lib/db/src/schema/` — Drizzle schema: documents, chunks, conversations, messages
+- `lib/db/src/schema/` — Drizzle schema: documents, chunks, conversations, messages, sync_connections, sync_folders
 - `artifacts/api-server/src/routes/documents/` — document upload + processing pipeline
+- `artifacts/api-server/src/routes/sync/` — SharePoint sync status, run, document tree
+- `artifacts/api-server/src/lib/sharePointSync.ts` — stub layout, tree builder, sync orchestration
+- `artifacts/api-server/src/lib/microsoftGraphClient.ts` — Graph API client (client credentials)
 - `artifacts/api-server/src/routes/openai/` — RAG chat routes (SSE streaming)
 - `artifacts/api-server/src/lib/docProcessor.ts` — PDF/Excel/Word text extraction + chunking
 - `artifacts/api-server/src/lib/ragSearch.ts` — PostgreSQL full-text search for chunk retrieval
@@ -45,7 +52,7 @@ A RAG-powered commercial lease intelligence platform for property managers. Uplo
 
 - **Landing page**: Clean marketing page with Clerk sign-in/sign-up
 - **Chat interface**: Sidebar conversation list, streaming markdown-rendered responses, quick-action chips (Expirations, Deadlines, Escalations, Portfolio summary)
-- **Document library**: Drag-and-drop upload, processing status, portfolio stats dashboard
+- **Document library**: Drag-and-drop upload, SharePoint-style folder tree, sync status banner, processing status, portfolio stats dashboard
 - **Supported file types**: PDF, Excel (.xlsx/.xls), CSV, Word (.docx/.doc), plain text
 
 ## User preferences

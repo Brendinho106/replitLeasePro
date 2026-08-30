@@ -12,6 +12,8 @@ tags:
     description: Health operations
   - name: documents
     description: Lease document management and ingestion
+  - name: sync
+    description: SharePoint library sync
   - name: openai
     description: OpenAI AI chat operations
 paths:
@@ -97,6 +99,51 @@ paths:
           description: Deleted
         "404":
           description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /documents/tree:
+    get:
+      operationId: getDocumentTree
+      tags: [documents]
+      summary: Get nested folder tree for document library
+      responses:
+        "200":
+          description: Folder tree with sync status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DocumentTreeResponse"
+
+  /sync/status:
+    get:
+      operationId: getSyncStatus
+      tags: [sync]
+      summary: SharePoint sync connection status
+      responses:
+        "200":
+          description: Sync status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SyncStatus"
+
+  /sync/run:
+    post:
+      operationId: runSync
+      tags: [sync]
+      summary: Trigger SharePoint mirror sync
+      responses:
+        "200":
+          description: Sync result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SyncRunResult"
+        "500":
+          description: Sync error
           content:
             application/json:
               schema:
@@ -263,6 +310,16 @@ components:
         processedAt:
           type: ["string", "null"]
           format: date-time
+        folderId:
+          type: ["integer", "null"]
+        source:
+          type: string
+          enum: [upload, sharepoint]
+        relativePath:
+          type: ["string", "null"]
+        visibility:
+          type: string
+          enum: [all, restricted]
       required:
         - id
         - filename
@@ -306,6 +363,133 @@ components:
       required:
         - fileType
         - count
+
+    SyncStatus:
+      type: object
+      properties:
+        connectionId:
+          type: ["integer", "null"]
+        provider:
+          type: string
+        siteUrl:
+          type: string
+        rootFolderPath:
+          type: string
+        syncStatus:
+          type: string
+        lastSyncedAt:
+          type: ["string", "null"]
+          format: date-time
+        lastSyncError:
+          type: ["string", "null"]
+        isConfigured:
+          type: boolean
+        isStub:
+          type: boolean
+        message:
+          type: string
+      required:
+        - provider
+        - siteUrl
+        - rootFolderPath
+        - syncStatus
+        - isConfigured
+        - isStub
+        - message
+
+    SyncRunResult:
+      type: object
+      properties:
+        mode:
+          type: string
+          enum: [stub, live]
+        added:
+          type: integer
+        deleted:
+          type: integer
+        skipped:
+          type: integer
+        message:
+          type: string
+      required:
+        - mode
+        - added
+        - deleted
+        - skipped
+        - message
+
+    DocumentTreeFile:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [file]
+        id:
+          type: integer
+        name:
+          type: string
+        fileType:
+          type: string
+        status:
+          type: string
+        chunkCount:
+          type: ["integer", "null"]
+        source:
+          type: string
+        relativePath:
+          type: ["string", "null"]
+        uploadedAt:
+          type: string
+          format: date-time
+      required:
+        - type
+        - id
+        - name
+        - fileType
+        - status
+        - source
+        - uploadedAt
+
+    DocumentTreeFolder:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [folder]
+        id:
+          type: integer
+        name:
+          type: string
+        path:
+          type: string
+        isLocal:
+          type: boolean
+        children:
+          type: array
+          items:
+            oneOf:
+              - $ref: "#/components/schemas/DocumentTreeFolder"
+              - $ref: "#/components/schemas/DocumentTreeFile"
+      required:
+        - type
+        - id
+        - name
+        - path
+        - isLocal
+        - children
+
+    DocumentTreeResponse:
+      type: object
+      properties:
+        sync:
+          $ref: "#/components/schemas/SyncStatus"
+        tree:
+          type: array
+          items:
+            $ref: "#/components/schemas/DocumentTreeFolder"
+      required:
+        - sync
+        - tree
 
     OpenaiConversation:
       type: object

@@ -5,6 +5,7 @@ import { documentsTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
 import { extractText, chunkText } from "./lib/docProcessor";
 import { chunksTable } from "@workspace/db";
+import { ensureStubLayout } from "./lib/sharePointSync";
 
 const rawPort = process.env["PORT"];
 
@@ -28,8 +29,10 @@ app.listen(port, (err) => {
 
   logger.info({ port }, "Server listening");
 
-  // Process any documents left in 'pending' state (e.g. from a previous crash,
-  // or scanned PDFs that previously errored and have been reset for retry).
+  ensureStubLayout().catch((e) =>
+    logger.error({ err: e }, "SharePoint stub layout initialization failed"),
+  );
+
   processPendingDocuments().catch((e) =>
     logger.error({ err: e }, "Startup pending-document processing failed"),
   );

@@ -15,6 +15,7 @@ import {
 import { extractText, chunkText } from "../../lib/docProcessor";
 import { logger } from "../../lib/logger";
 import { objectStorageClient } from "../../lib/objectStorage";
+import { getUploadsFolderId } from "../../lib/sharePointSync";
 
 const router: IRouter = Router();
 
@@ -80,6 +81,8 @@ router.post("/documents/upload", upload.single("file"), async (req, res): Promis
     unlink(req.file.path).catch(() => {});
   }
 
+  const uploadsFolderId = await getUploadsFolderId();
+
   const [doc] = await db
     .insert(documentsTable)
     .values({
@@ -88,6 +91,9 @@ router.post("/documents/upload", upload.single("file"), async (req, res): Promis
       fileType: ext,
       filePath: gcsKey,   // GCS key, not local path
       status: "pending",
+      source: "upload",
+      folderId: uploadsFolderId,
+      relativePath: req.file.originalname,
     })
     .returning();
 
@@ -249,6 +255,7 @@ router.post("/documents/admin/register", async (req, res): Promise<void> => {
   }
 
   const filename = gcsKey.split("/").pop() ?? gcsKey;
+  const uploadsFolderId = await getUploadsFolderId();
 
   const [doc] = await db
     .insert(documentsTable)
@@ -258,6 +265,9 @@ router.post("/documents/admin/register", async (req, res): Promise<void> => {
       fileType,
       filePath: gcsKey,
       status: "error",
+      source: "upload",
+      folderId: uploadsFolderId,
+      relativePath: originalName,
       errorMessage:
         "No readable text could be extracted. This PDF likely has content-extraction restrictions set by the signing platform (DocuSign/Adobe Sign). Open in Acrobat → Print → Save as PDF to remove restrictions, then re-upload.",
     })
