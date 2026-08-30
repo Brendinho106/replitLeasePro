@@ -341,7 +341,7 @@ async function processDocument(docId: number, filePath: string, fileType: string
         .set({
           status: "error",
           errorMessage:
-            "No readable text could be extracted. This file may be a scanned image-only PDF. Try re-saving with a text layer, or export to Word/text first.",
+            "No readable text could be extracted after OCR. Common causes: (1) DocuSign/Adobe Sign PDF with copy restrictions — open in Acrobat and Print to PDF to remove security; (2) image-only floor plan or drawing with no text; (3) corrupted upload. Re-upload a searchable PDF if possible.",
         })
         .where(eq(documentsTable.id, docId));
       logger.warn({ docId }, "Document produced no extractable text");

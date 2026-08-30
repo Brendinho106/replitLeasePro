@@ -77,7 +77,7 @@ async function processOne(doc: typeof documentsTable.$inferSelect): Promise<void
         .set({
           status: "error",
           errorMessage:
-            "No readable text could be extracted even after OCR. The file may be corrupted or use an unsupported encoding.",
+            "No readable text could be extracted after OCR. Common causes: DocuSign/Adobe Sign restrictions, image-only drawings, or a corrupted file. Try Print to PDF in Acrobat and re-upload.",
         })
         .where(eq(documentsTable.id, doc.id));
       logger.warn({ docId: doc.id }, "Startup processing: no text extracted");
